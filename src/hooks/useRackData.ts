@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { RackData } from '../types';
 import { groupRacksByCountry, filterRacks } from '../utils/dataProcessing';
+import { supabase } from '../utils/supabaseClient';
 
 interface UseRackDataOptions {
   forceShowAllRacks?: boolean;
@@ -79,7 +80,6 @@ export function useRackData(options: UseRackDataOptions = {}): UseRackDataReturn
       setLoading(true);
       setError(null);
 
-      // Add timestamp to prevent caching
       const timestamp = new Date().getTime();
       const response = await fetch(`/api/racks/energy?t=${timestamp}`, {
         cache: 'no-store',
@@ -90,8 +90,16 @@ export function useRackData(options: UseRackDataOptions = {}): UseRackDataReturn
         }
       });
 
-      // If unauthorized, silently fail (user not logged in yet)
       if (response.status === 401) {
+        setLoading(false);
+        return;
+      }
+
+      const contentType = response.headers.get('content-type') || '';
+      if (!contentType.includes('application/json')) {
+        console.warn('API backend no disponible, mostrando sin datos de racks');
+        setRacks([]);
+        setOriginalRackGroups([]);
         setLoading(false);
         return;
       }
@@ -99,7 +107,7 @@ export function useRackData(options: UseRackDataOptions = {}): UseRackDataReturn
       if (!response.ok) {
         throw new Error(`HTTP ${response.status}: ${response.statusText}`);
       }
-      
+
       const data = await response.json();
       if (!data.success) {
         throw new Error(data.message || 'Failed to fetch rack data');
@@ -130,32 +138,22 @@ export function useRackData(options: UseRackDataOptions = {}): UseRackDataReturn
           }
         });
       }
-      
-      // Set all racks to show "España" as country
+
       flatRacks.forEach(rack => {
-        rack.country = 'España';
+        rack.country = 'Espana';
       });
-      
-      // Normalize site names - unify Cantabria sites
+
       flatRacks.forEach(rack => {
         if (rack.site && rack.site.toLowerCase().includes('cantabria')) {
           rack.site = 'Cantabria';
         }
       });
 
-      console.log('📡 Datos de racks recibidos:', {
-        total: flatRacks.length,
-        primerosRacks: flatRacks.slice(0, 3).map(r => ({
-          name: r.name,
-          gwName: r.gwName || 'Sin Gateway',
-          gwIp: r.gwIp || 'Sin IP'
-        }))
-      });
-
       setRacks(flatRacks);
     } catch (err) {
-      console.error('Error fetching racks:', err);
-      setError(err instanceof Error ? err.message : 'Unknown error occurred');
+      console.warn('Backend API no disponible:', err);
+      setRacks([]);
+      setOriginalRackGroups([]);
     } finally {
       setLoading(false);
     }
@@ -163,60 +161,28 @@ export function useRackData(options: UseRackDataOptions = {}): UseRackDataReturn
 
   const fetchMaintenanceRacks = async () => {
     try {
-      const timestamp = new Date().getTime();
-      const response = await fetch(`/api/maintenance?t=${timestamp}`, {
-        cache: 'no-store',
-        credentials: 'include',
-        headers: {
-          'Cache-Control': 'no-cache',
-          'Pragma': 'no-cache'
+      const { data: details, error: fetchError } = await supabase
+        .from('maintenance_rack_details')
+        .select('rack_id, name');
+
+      if (fetchError) {
+        console.error('Error fetching maintenance racks:', fetchError);
+        return;
+      }
+
+      const maintenanceSet = new Set<string>();
+      (details || []).forEach((rack) => {
+        if (rack.rack_id) {
+          const rackIdStr = String(rack.rack_id).trim();
+          if (rackIdStr) maintenanceSet.add(rackIdStr);
+        }
+        if (rack.name) {
+          const rackNameStr = String(rack.name).trim();
+          if (rackNameStr && rackNameStr !== rack.rack_id) maintenanceSet.add(rackNameStr);
         }
       });
 
-      // If unauthorized, silently fail (user not logged in yet)
-      if (response.status === 401) {
-        return;
-      }
-
-      if (!response.ok) {
-        console.error('Failed to fetch maintenance racks');
-        return;
-      }
-
-      const data = await response.json();
-      if (data.success && Array.isArray(data.data)) {
-        const maintenanceSet = new Set<string>();
-        let totalRackRecords = 0;
-
-        data.data.forEach((entry: any) => {
-          if (Array.isArray(entry.racks)) {
-            entry.racks.forEach((rack: any) => {
-              totalRackRecords++;
-              if (rack.rack_id) {
-                const rackIdStr = String(rack.rack_id).trim();
-                if (rackIdStr) {
-                  maintenanceSet.add(rackIdStr);
-                }
-              }
-              if (rack.name) {
-                const rackNameStr = String(rack.name).trim();
-                if (rackNameStr && rackNameStr !== rack.rack_id) {
-                  maintenanceSet.add(rackNameStr);
-                }
-              }
-            });
-          }
-        });
-
-        console.log('🔍 useRackData - Maintenance Racks Loaded:', {
-          entries: data.data.length,
-          totalRackRecords,
-          uniqueRacks: maintenanceSet.size,
-          sampleRackIds: Array.from(maintenanceSet).slice(0, 5)
-        });
-
-        setMaintenanceRacks(maintenanceSet);
-      }
+      setMaintenanceRacks(maintenanceSet);
     } catch (err) {
       console.error('Error fetching maintenance racks:', err);
     }

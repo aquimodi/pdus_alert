@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Settings, Save, RefreshCw, AlertTriangle, CheckCircle, Database, X, Users } from 'lucide-react';
 import { ThresholdData } from '../types';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../utils/supabaseClient';
 import UserManagement from './UserManagement';
 
 interface ThresholdManagerProps {
@@ -56,9 +57,8 @@ export default function ThresholdManager({ thresholds, onSaveSuccess, onClose }:
     setSaving(true);
     setError(null);
     setSuccess(null);
-    
+
     try {
-      // Filter tempValues to only include supported keys
       const filteredValues: Record<string, number> = {};
       Object.entries(tempValues).forEach(([key, value]) => {
         if (supportedKeys.includes(key)) {
@@ -69,32 +69,23 @@ export default function ThresholdManager({ thresholds, onSaveSuccess, onClose }:
         }
       });
 
-      const response = await fetch('/api/thresholds', {
-        method: 'PUT',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ thresholds: filteredValues }),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+      let updatedCount = 0;
+      for (const [key, value] of Object.entries(filteredValues)) {
+        const { error: upsertError } = await supabase
+          .from('threshold_configs')
+          .update({ value, updated_at: new Date().toISOString() })
+          .eq('threshold_key', key);
+
+        if (upsertError) throw upsertError;
+        updatedCount++;
       }
-      
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to save thresholds');
-      }
-      
-      setSuccess(`${result.count} umbrales actualizados correctamente`);
+
+      setSuccess(`${updatedCount} umbrales actualizados correctamente`);
       setTimeout(() => setSuccess(null), 5000);
-      
-      // Reset saving state and notify parent to refresh data
+
       setSaving(false);
       onSaveSuccess();
-      
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al guardar los umbrales');
       setSaving(false);

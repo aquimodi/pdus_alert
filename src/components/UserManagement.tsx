@@ -1,26 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import { Users, Plus, Edit2, Trash2, Save, X, AlertTriangle, CheckCircle } from 'lucide-react';
+import { supabase } from '../utils/supabaseClient';
 
-interface User {
+interface UserProfile {
   id: string;
   usuario: string;
   rol: string;
   sitios_asignados: string[] | null;
   activo: boolean;
-  fecha_creacion: string;
-  fecha_modificacion: string;
+  created_at: string;
+  updated_at: string;
+}
+
+const AVAILABLE_SITES = [
+  'Derio', 'Zamudio', 'Cantabria DC1', 'Cantabria DC2', 'Barcelona', 'Madrid'
+];
+
+function toEmail(usuario: string): string {
+  return `${usuario.toLowerCase().replace(/\s+/g, '_')}@energy.local`;
 }
 
 export default function UserManagement() {
-  const [users, setUsers] = useState<User[]>([]);
-  const [sites, setSites] = useState<string[]>([]);
+  const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [success, setSuccess] = useState<string | null>(null);
 
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [showEditModal, setShowEditModal] = useState(false);
-  const [selectedUser, setSelectedUser] = useState<User | null>(null);
+  const [selectedUser, setSelectedUser] = useState<UserProfile | null>(null);
 
   const [formData, setFormData] = useState({
     usuario: '',
@@ -32,44 +40,22 @@ export default function UserManagement() {
 
   useEffect(() => {
     fetchUsers();
-    fetchSites();
   }, []);
 
   const fetchUsers = async () => {
     try {
       setLoading(true);
-      const response = await fetch('/api/users', {
-        credentials: 'include'
-      });
+      const { data, error: fetchError } = await supabase
+        .from('profiles')
+        .select('*')
+        .order('created_at', { ascending: false });
 
-      if (!response.ok) {
-        throw new Error('Error al obtener usuarios');
-      }
-
-      const data = await response.json();
-      setUsers(data.users || []);
+      if (fetchError) throw fetchError;
+      setUsers(data || []);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al cargar usuarios');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const fetchSites = async () => {
-    try {
-      const response = await fetch('/api/sites', {
-        credentials: 'include'
-      });
-
-      if (!response.ok) {
-        throw new Error('Error al obtener sitios');
-      }
-
-      const data = await response.json();
-      setSites(data.sites || []);
-    } catch (err) {
-      console.error('Error loading sites:', err);
-      setSites([]);
     }
   };
 
@@ -84,7 +70,7 @@ export default function UserManagement() {
     setShowCreateModal(true);
   };
 
-  const handleEdit = (user: User) => {
+  const handleEdit = (user: UserProfile) => {
     setSelectedUser(user);
     setFormData({
       usuario: user.usuario,
@@ -96,22 +82,16 @@ export default function UserManagement() {
     setShowEditModal(true);
   };
 
-  const handleDelete = async (user: User) => {
-    if (!confirm(`¿Está seguro de eliminar al usuario "${user.usuario}"?`)) {
-      return;
-    }
+  const handleDelete = async (user: UserProfile) => {
+    if (!confirm(`Seguro de eliminar al usuario "${user.usuario}"?`)) return;
 
     try {
-      const response = await fetch(`/api/users/${user.id}`, {
-        method: 'DELETE',
-        credentials: 'include'
-      });
+      const { error: deleteError } = await supabase
+        .from('profiles')
+        .delete()
+        .eq('id', user.id);
 
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || 'Error al eliminar usuario');
-      }
+      if (deleteError) throw deleteError;
 
       setSuccess('Usuario eliminado exitosamente');
       setTimeout(() => setSuccess(null), 5000);
@@ -127,25 +107,27 @@ export default function UserManagement() {
     setError(null);
 
     try {
-      const response = await fetch('/api/users', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        credentials: 'include',
-        body: JSON.stringify({
-          usuario: formData.usuario,
-          password: formData.password,
-          rol: formData.rol,
-          sitios_asignados: formData.sitios_asignados
-        })
+      const email = toEmail(formData.usuario);
+
+      const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+        email,
+        password: formData.password,
       });
 
-      const data = await response.json();
+      if (signUpError) throw signUpError;
+      if (!signUpData.user) throw new Error('No se pudo crear el usuario');
 
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || 'Error al crear usuario');
-      }
+      const { error: profileError } = await supabase
+        .from('profiles')
+        .insert({
+          id: signUpData.user.id,
+          usuario: formData.usuario,
+          rol: formData.rol,
+          sitios_asignados: formData.sitios_asignados,
+          activo: true,
+        });
+
+      if (profileError) throw profileError;
 
       setSuccess('Usuario creado exitosamente');
       setTimeout(() => setSuccess(null), 5000);
@@ -163,31 +145,18 @@ export default function UserManagement() {
     if (!selectedUser) return;
 
     try {
-      const payload: any = {
-        usuario: formData.usuario,
-        rol: formData.rol,
-        sitios_asignados: formData.sitios_asignados,
-        activo: formData.activo
-      };
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({
+          usuario: formData.usuario,
+          rol: formData.rol,
+          sitios_asignados: formData.sitios_asignados,
+          activo: formData.activo,
+          updated_at: new Date().toISOString(),
+        })
+        .eq('id', selectedUser.id);
 
-      if (formData.password && formData.password.trim() !== '') {
-        payload.password = formData.password;
-      }
-
-      const response = await fetch(`/api/users/${selectedUser.id}`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        credentials: 'include',
-        body: JSON.stringify(payload)
-      });
-
-      const data = await response.json();
-
-      if (!response.ok || !data.success) {
-        throw new Error(data.message || 'Error al actualizar usuario');
-      }
+      if (updateError) throw updateError;
 
       setSuccess('Usuario actualizado exitosamente');
       setTimeout(() => setSuccess(null), 5000);
@@ -218,7 +187,7 @@ export default function UserManagement() {
       <div className="flex justify-between items-center mb-6">
         <h2 className="text-xl font-bold text-gray-900 flex items-center">
           <Users className="h-6 w-6 mr-2 text-blue-600" />
-          Gestión de Usuarios
+          Gestion de Usuarios
         </h2>
 
         <button
@@ -247,7 +216,7 @@ export default function UserManagement() {
           <div className="flex">
             <CheckCircle className="h-5 w-5 text-green-400 mr-2 mt-0.5" />
             <div>
-              <h3 className="text-sm font-medium text-green-800">Éxito</h3>
+              <h3 className="text-sm font-medium text-green-800">Exito</h3>
               <p className="mt-1 text-sm text-green-700">{success}</p>
             </div>
           </div>
@@ -277,7 +246,7 @@ export default function UserManagement() {
                   Estado
                 </th>
                 <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                  Fecha Creación
+                  Fecha Creacion
                 </th>
                 <th className="px-6 py-3 text-right text-xs font-medium text-gray-500 uppercase tracking-wider">
                   Acciones
@@ -316,7 +285,7 @@ export default function UserManagement() {
                     </span>
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-sm text-gray-500">
-                    {new Date(user.fecha_creacion).toLocaleDateString()}
+                    {new Date(user.created_at).toLocaleDateString()}
                   </td>
                   <td className="px-6 py-4 whitespace-nowrap text-right text-sm font-medium">
                     <button
@@ -348,25 +317,19 @@ export default function UserManagement() {
         </div>
       )}
 
-      {/* Create User Modal */}
       {showCreateModal && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
           <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-medium text-gray-900">Crear Nuevo Usuario</h3>
-              <button
-                onClick={() => setShowCreateModal(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
+              <button onClick={() => setShowCreateModal(false)} className="text-gray-400 hover:text-gray-600">
                 <X className="h-5 w-5" />
               </button>
             </div>
 
             <form onSubmit={handleSubmitCreate} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Usuario
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Usuario</label>
                 <input
                   type="text"
                   value={formData.usuario}
@@ -377,22 +340,19 @@ export default function UserManagement() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Contraseña
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Contrasena</label>
                 <input
                   type="password"
                   value={formData.password}
                   onChange={(e) => setFormData({ ...formData, password: e.target.value })}
                   className="w-full px-3 py-2 border border-gray-300 rounded-md"
                   required
+                  minLength={6}
                 />
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Rol
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Rol</label>
                 <select
                   value={formData.rol}
                   onChange={(e) => setFormData({ ...formData, rol: e.target.value })}
@@ -401,11 +361,10 @@ export default function UserManagement() {
                 >
                   <option value="Administrador">Administrador</option>
                   <option value="Operador">Operador</option>
-                  <option value="Tecnico">Técnico</option>
+                  <option value="Tecnico">Tecnico</option>
                   <option value="Observador">Observador</option>
                 </select>
 
-                {/* Role Descriptions */}
                 <div className="mt-3 p-3 bg-gray-50 rounded-md border border-gray-200">
                   <p className="text-xs font-semibold text-gray-700 mb-2">Permisos por rol:</p>
                   <div className="space-y-2 text-xs text-gray-600">
@@ -413,89 +372,66 @@ export default function UserManagement() {
                       <span className="font-semibold text-red-700">Administrador:</span> Acceso total. Gestiona usuarios, umbrales, exporta y maneja mantenimientos.
                     </div>
                     <div className={`p-2 rounded ${formData.rol === 'Operador' ? 'bg-blue-50 border border-blue-200' : ''}`}>
-                      <span className="font-semibold text-blue-700">Operador:</span> Gestiona umbrales, exporta y maneja mantenimientos. No gestiona usuarios.
+                      <span className="font-semibold text-blue-700">Operador:</span> Gestiona umbrales, exporta y maneja mantenimientos.
                     </div>
                     <div className={`p-2 rounded ${formData.rol === 'Tecnico' ? 'bg-green-50 border border-green-200' : ''}`}>
-                      <span className="font-semibold text-green-700">Técnico:</span> Exporta alertas y maneja mantenimientos. No accede a configuración.
+                      <span className="font-semibold text-green-700">Tecnico:</span> Exporta alertas y maneja mantenimientos.
                     </div>
                     <div className={`p-2 rounded ${formData.rol === 'Observador' ? 'bg-gray-50 border border-gray-300' : ''}`}>
-                      <span className="font-semibold text-gray-700">Observador:</span> Solo lectura. No puede exportar, configurar ni gestionar mantenimientos.
+                      <span className="font-semibold text-gray-700">Observador:</span> Solo lectura.
                     </div>
                   </div>
                 </div>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Sitios Asignados
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Sitios Asignados</label>
                 <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
-                  {sites.length === 0 ? (
-                    <p className="text-sm text-gray-500">Cargando sitios...</p>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="flex items-center mb-2 pb-2 border-b border-gray-200">
+                  <div className="space-y-2">
+                    <div className="flex items-center mb-2 pb-2 border-b border-gray-200">
+                      <input
+                        type="checkbox"
+                        id="select-all-sites-create"
+                        checked={formData.sitios_asignados.length === 0}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setFormData({ ...formData, sitios_asignados: [] });
+                          }
+                        }}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                      <label htmlFor="select-all-sites-create" className="ml-2 block text-sm font-semibold text-gray-900">
+                        Todos los sitios
+                      </label>
+                    </div>
+                    {AVAILABLE_SITES.map((site) => (
+                      <div key={site} className="flex items-center">
                         <input
                           type="checkbox"
-                          id="select-all-sites-create"
-                          checked={formData.sitios_asignados.length === 0}
+                          id={`site-create-${site}`}
+                          checked={formData.sitios_asignados.includes(site)}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              setFormData({ ...formData, sitios_asignados: [] });
+                              setFormData({ ...formData, sitios_asignados: [...formData.sitios_asignados, site] });
+                            } else {
+                              setFormData({ ...formData, sitios_asignados: formData.sitios_asignados.filter(s => s !== site) });
                             }
                           }}
                           className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                         />
-                        <label htmlFor="select-all-sites-create" className="ml-2 block text-sm font-semibold text-gray-900">
-                          Todos los sitios
-                        </label>
+                        <label htmlFor={`site-create-${site}`} className="ml-2 block text-sm text-gray-700">{site}</label>
                       </div>
-                      {sites.map((site) => (
-                        <div key={site} className="flex items-center">
-                          <input
-                            type="checkbox"
-                            id={`site-create-${site}`}
-                            checked={formData.sitios_asignados.includes(site)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setFormData({
-                                  ...formData,
-                                  sitios_asignados: [...formData.sitios_asignados, site]
-                                });
-                              } else {
-                                setFormData({
-                                  ...formData,
-                                  sitios_asignados: formData.sitios_asignados.filter(s => s !== site)
-                                });
-                              }
-                            }}
-                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                          />
-                          <label htmlFor={`site-create-${site}`} className="ml-2 block text-sm text-gray-700">
-                            {site}
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                    ))}
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">
-                  Dejar sin selección para dar acceso a todos los sitios
-                </p>
+                <p className="mt-1 text-xs text-gray-500">Dejar sin seleccion para dar acceso a todos los sitios</p>
               </div>
 
               <div className="flex justify-end space-x-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowCreateModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
+                <button type="button" onClick={() => setShowCreateModal(false)} className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
                   Cancelar
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
-                >
+                <button type="submit" className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
                   <Save className="h-4 w-4 inline mr-1" />
                   Crear
                 </button>
@@ -505,25 +441,19 @@ export default function UserManagement() {
         </div>
       )}
 
-      {/* Edit User Modal */}
       {showEditModal && selectedUser && (
         <div className="fixed inset-0 bg-gray-600 bg-opacity-50 overflow-y-auto h-full w-full z-50">
           <div className="relative top-20 mx-auto p-5 border w-96 shadow-lg rounded-md bg-white">
             <div className="flex justify-between items-center mb-4">
               <h3 className="text-lg font-medium text-gray-900">Editar Usuario</h3>
-              <button
-                onClick={() => setShowEditModal(false)}
-                className="text-gray-400 hover:text-gray-600"
-              >
+              <button onClick={() => setShowEditModal(false)} className="text-gray-400 hover:text-gray-600">
                 <X className="h-5 w-5" />
               </button>
             </div>
 
             <form onSubmit={handleSubmitEdit} className="space-y-4">
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Usuario
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Usuario</label>
                 <input
                   type="text"
                   value={formData.usuario}
@@ -534,24 +464,7 @@ export default function UserManagement() {
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Nueva Contraseña
-                </label>
-                <input
-                  type="password"
-                  value={formData.password}
-                  onChange={(e) => setFormData({ ...formData, password: e.target.value })}
-                  className="w-full px-3 py-2 border border-gray-300 rounded-md"
-                />
-                <p className="mt-1 text-xs text-gray-500">
-                  Dejar en blanco para mantener la contraseña actual
-                </p>
-              </div>
-
-              <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Rol
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Rol</label>
                 <select
                   value={formData.rol}
                   onChange={(e) => setFormData({ ...formData, rol: e.target.value })}
@@ -560,68 +473,51 @@ export default function UserManagement() {
                 >
                   <option value="Administrador">Administrador</option>
                   <option value="Operador">Operador</option>
-                  <option value="Tecnico">Técnico</option>
+                  <option value="Tecnico">Tecnico</option>
                   <option value="Observador">Observador</option>
                 </select>
               </div>
 
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">
-                  Sitios Asignados
-                </label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Sitios Asignados</label>
                 <div className="border border-gray-300 rounded-md p-3 max-h-48 overflow-y-auto">
-                  {sites.length === 0 ? (
-                    <p className="text-sm text-gray-500">Cargando sitios...</p>
-                  ) : (
-                    <div className="space-y-2">
-                      <div className="flex items-center mb-2 pb-2 border-b border-gray-200">
+                  <div className="space-y-2">
+                    <div className="flex items-center mb-2 pb-2 border-b border-gray-200">
+                      <input
+                        type="checkbox"
+                        id="select-all-sites-edit"
+                        checked={formData.sitios_asignados.length === 0}
+                        onChange={(e) => {
+                          if (e.target.checked) {
+                            setFormData({ ...formData, sitios_asignados: [] });
+                          }
+                        }}
+                        className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
+                      />
+                      <label htmlFor="select-all-sites-edit" className="ml-2 block text-sm font-semibold text-gray-900">
+                        Todos los sitios
+                      </label>
+                    </div>
+                    {AVAILABLE_SITES.map((site) => (
+                      <div key={site} className="flex items-center">
                         <input
                           type="checkbox"
-                          id="select-all-sites-edit"
-                          checked={formData.sitios_asignados.length === 0}
+                          id={`site-edit-${site}`}
+                          checked={formData.sitios_asignados.includes(site)}
                           onChange={(e) => {
                             if (e.target.checked) {
-                              setFormData({ ...formData, sitios_asignados: [] });
+                              setFormData({ ...formData, sitios_asignados: [...formData.sitios_asignados, site] });
+                            } else {
+                              setFormData({ ...formData, sitios_asignados: formData.sitios_asignados.filter(s => s !== site) });
                             }
                           }}
                           className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                         />
-                        <label htmlFor="select-all-sites-edit" className="ml-2 block text-sm font-semibold text-gray-900">
-                          Todos los sitios
-                        </label>
+                        <label htmlFor={`site-edit-${site}`} className="ml-2 block text-sm text-gray-700">{site}</label>
                       </div>
-                      {sites.map((site) => (
-                        <div key={site} className="flex items-center">
-                          <input
-                            type="checkbox"
-                            id={`site-edit-${site}`}
-                            checked={formData.sitios_asignados.includes(site)}
-                            onChange={(e) => {
-                              if (e.target.checked) {
-                                setFormData({
-                                  ...formData,
-                                  sitios_asignados: [...formData.sitios_asignados, site]
-                                });
-                              } else {
-                                setFormData({
-                                  ...formData,
-                                  sitios_asignados: formData.sitios_asignados.filter(s => s !== site)
-                                });
-                              }
-                            }}
-                            className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
-                          />
-                          <label htmlFor={`site-edit-${site}`} className="ml-2 block text-sm text-gray-700">
-                            {site}
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                    ))}
+                  </div>
                 </div>
-                <p className="mt-1 text-xs text-gray-500">
-                  Dejar sin selección para dar acceso a todos los sitios
-                </p>
               </div>
 
               <div className="flex items-center">
@@ -632,23 +528,14 @@ export default function UserManagement() {
                   onChange={(e) => setFormData({ ...formData, activo: e.target.checked })}
                   className="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded"
                 />
-                <label htmlFor="activo" className="ml-2 block text-sm text-gray-700">
-                  Usuario activo
-                </label>
+                <label htmlFor="activo" className="ml-2 block text-sm text-gray-700">Usuario activo</label>
               </div>
 
               <div className="flex justify-end space-x-3 pt-4">
-                <button
-                  type="button"
-                  onClick={() => setShowEditModal(false)}
-                  className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50"
-                >
+                <button type="button" onClick={() => setShowEditModal(false)} className="px-4 py-2 border border-gray-300 rounded-md text-sm font-medium text-gray-700 hover:bg-gray-50">
                   Cancelar
                 </button>
-                <button
-                  type="submit"
-                  className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700"
-                >
+                <button type="submit" className="px-4 py-2 border border-transparent rounded-md text-sm font-medium text-white bg-blue-600 hover:bg-blue-700">
                   <Save className="h-4 w-4 inline mr-1" />
                   Guardar
                 </button>

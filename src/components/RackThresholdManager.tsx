@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Settings, Save, RefreshCw, AlertTriangle, CheckCircle, Database, X, RotateCcw } from 'lucide-react';
 import { ThresholdData } from '../types';
 import { useThresholds } from '../hooks/useThresholds';
+import { supabase } from '../utils/supabaseClient';
 
 interface RackThresholdManagerProps {
   rackId: string;
@@ -61,9 +62,8 @@ export default function RackThresholdManager({ rackId, rackName, onSaveSuccess, 
     setSaving(true);
     setError(null);
     setSuccess(null);
-    
+
     try {
-      // Filter tempValues to only include supported keys with changes
       const changedValues: Record<string, number> = {};
       Object.entries(tempValues).forEach(([key, value]) => {
         if (supportedKeys.includes(key)) {
@@ -81,34 +81,32 @@ export default function RackThresholdManager({ rackId, rackName, onSaveSuccess, 
         return;
       }
 
-      const response = await fetch(`/api/racks/${rackId}/thresholds`, {
-        method: 'PUT',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ thresholds: changedValues }),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
+      let updatedCount = 0;
+      for (const [key, value] of Object.entries(changedValues)) {
+        const globalThreshold = globalThresholds.find(g => g.key === key);
+        const { error: upsertError } = await supabase
+          .from('rack_threshold_overrides')
+          .upsert({
+            rack_id: rackId,
+            threshold_key: key,
+            value,
+            unit: globalThreshold?.unit || '',
+            description: globalThreshold?.description || '',
+            updated_at: new Date().toISOString(),
+          }, { onConflict: 'rack_id,threshold_key' });
+
+        if (upsertError) throw upsertError;
+        updatedCount++;
       }
-      
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to save rack-specific thresholds');
-      }
-      
-      setSuccess(`${result.count} umbrales específicos actualizados correctamente para ${rackName}`);
+
+      setSuccess(`${updatedCount} umbrales especificos actualizados correctamente para ${rackName}`);
       setTimeout(() => setSuccess(null), 5000);
-      
-      // Refresh thresholds and notify parent
+
       await refreshThresholds();
       onSaveSuccess();
-      
+
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Error al guardar los umbrales específicos del rack');
+      setError(err instanceof Error ? err.message : 'Error al guardar los umbrales especificos del rack');
     } finally {
       setSaving(false);
     }
@@ -118,30 +116,21 @@ export default function RackThresholdManager({ rackId, rackName, onSaveSuccess, 
     setResetting(true);
     setError(null);
     setSuccess(null);
-    
+
     try {
-      const response = await fetch(`/api/racks/${rackId}/thresholds`, {
-        method: 'DELETE',
-        credentials: 'include',
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
-      }
-      
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error(result.message || 'Failed to reset rack-specific thresholds');
-      }
-      
+      const { error: deleteError } = await supabase
+        .from('rack_threshold_overrides')
+        .delete()
+        .eq('rack_id', rackId);
+
+      if (deleteError) throw deleteError;
+
       setSuccess(`Umbrales de ${rackName} restablecidos a valores globales`);
       setTimeout(() => setSuccess(null), 5000);
-      
-      // Refresh thresholds and notify parent
+
       await refreshThresholds();
       onSaveSuccess();
-      
+
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al restablecer los umbrales del rack');
     } finally {

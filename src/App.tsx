@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import { Routes, Route } from 'react-router-dom';
-import { Activity, AlertTriangle, Settings, BarChart3, Zap, Download, RefreshCw, Wrench, LogOut, User, ChevronDown, ChevronUp, Bell, BellOff } from 'lucide-react';
+import { Activity, AlertTriangle, Settings, Download, RefreshCw, Wrench, LogOut, User, ChevronDown, ChevronUp, Bell, BellOff } from 'lucide-react';
 import CountryGroup from './components/CountryGroup';
 import ThresholdManager from './components/ThresholdManager';
 import RackThresholdManager from './components/RackThresholdManager';
@@ -10,6 +10,8 @@ import { useThresholds } from './hooks/useThresholds';
 import { getThresholdValue } from './utils/thresholdUtils';
 import { getMetricStatusColor, getAmperageStatusColor } from './utils/uiUtils';
 import { useAuth } from './contexts/AuthContext';
+import { supabase } from './utils/supabaseClient';
+import { RackData } from './types';
 
 function App() {
   const { user, logout } = useAuth();
@@ -567,29 +569,40 @@ function App() {
     const reason = userReason || 'Mantenimiento programado';
 
     try {
-      const response = await fetch('/api/maintenance/rack', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          rackId: rackName,
-          rackData: { ...rackData, name: rackName },
+      const { data: entry, error: entryError } = await supabase
+        .from('maintenance_entries')
+        .insert({
+          entry_type: 'individual_rack',
+          rack_id: rackName,
+          chain: rackData?.chain || chain || null,
+          site: rackData?.site || null,
+          dc: rackData?.dc || null,
           reason,
-          user: user?.usuario || 'Sistema'
+          started_by: user?.usuario || 'Sistema'
         })
-      });
+        .select('id')
+        .maybeSingle();
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
+      if (entryError) throw new Error(entryError.message);
+      if (!entry) throw new Error('No se pudo crear la entrada de mantenimiento');
 
-      const data = await response.json();
+      const { error: detailError } = await supabase
+        .from('maintenance_rack_details')
+        .insert({
+          entry_id: entry.id,
+          rack_id: rackData?.rackId || rackId,
+          name: rackName,
+          country: rackData?.country || null,
+          site: rackData?.site || null,
+          dc: rackData?.dc || null,
+          phase: rackData?.phase || null,
+          chain: rackData?.chain || chain || null,
+          node: rackData?.node || null,
+          gw_name: rackData?.gwName || null,
+          gw_ip: rackData?.gwIp || null
+        });
 
-      if (!data.success) {
-        throw new Error(data.message || 'Failed to send rack to maintenance');
-      }
+      if (detailError) throw new Error(detailError.message);
 
       alert(`El rack "${rackName}" ha sido enviado a mantenimiento.`);
       refreshData();
@@ -599,8 +612,7 @@ function App() {
     }
   };
 
-  const handleSendChainToMaintenance = async (chain: string, site: string, dc: string, rackData?: any) => {
-    // Check if user has permission based on assigned sites (Administrators are exempt)
+  const handleSendChainToMaintenance = async (chain: string, site: string, dc: string, _rackData?: any) => {
     if (user?.rol !== 'Administrador' && user?.sitios_asignados && user.sitios_asignados.length > 0) {
       if (!userHasAccessToSite(site)) {
         alert(`No tienes permisos para enviar a mantenimiento chains fuera de tus sitios asignados (${user.sitios_asignados.join(', ')})`);
@@ -617,48 +629,79 @@ function App() {
     const reason = userReason || 'Mantenimiento programado';
 
     try {
-      const response = await fetch('/api/maintenance/chain', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({
-          chain,
-          site,
-          dc,
-          rackData,
-          reason,
-          user: user?.usuario || 'Sistema'
-        })
+      const chainRacks = racks.filter(r =>
+        r.chain === chain && r.site === site && r.dc === dc
+      );
+
+      const uniqueRacksMap = new Map<string, RackData>();
+      chainRacks.forEach(r => {
+        const key = r.name || r.rackId || r.id;
+        if (key && !uniqueRacksMap.has(key)) {
+          uniqueRacksMap.set(key, r);
+        }
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      const data = await response.json();
-
-      if (!data.success) {
-        throw new Error(data.message || 'Failed to send chain to maintenance');
-      }
-
-      // Check if no racks were found
-      if (data.racksAdded === 0 && !data.data) {
-        alert(`⚠️ ${data.message || `No se encontraron racks para la chain "${chain}" en DC "${dc}"`}`);
+      if (uniqueRacksMap.size === 0) {
+        alert(`No se encontraron racks para la chain "${chain}" en DC "${dc}"`);
         return;
       }
 
-      const { racksAdded, racksFailed, totalRacks, totalPdusFiltered } = data.data;
+      const { data: entry, error: entryError } = await supabase
+        .from('maintenance_entries')
+        .insert({
+          entry_type: 'chain',
+          chain,
+          site,
+          dc,
+          reason,
+          started_by: user?.usuario || 'Sistema'
+        })
+        .select('id')
+        .maybeSingle();
+
+      if (entryError) throw new Error(entryError.message);
+      if (!entry) throw new Error('No se pudo crear la entrada de mantenimiento');
+
+      let racksAdded = 0;
+      let racksFailed = 0;
+
+      for (const [rackName, r] of uniqueRacksMap) {
+        const rackIdStr = String(r.rackId || r.id || rackName).trim();
+        if (maintenanceRacks.has(rackName) || maintenanceRacks.has(rackIdStr)) {
+          racksFailed++;
+          continue;
+        }
+
+        const { error: detailError } = await supabase
+          .from('maintenance_rack_details')
+          .insert({
+            entry_id: entry.id,
+            rack_id: r.rackId || r.id || rackName,
+            name: rackName,
+            country: r.country || null,
+            site: r.site || null,
+            dc: r.dc || null,
+            phase: r.phase || null,
+            chain: r.chain || null,
+            node: r.node || null,
+            gw_name: r.gwName || null,
+            gw_ip: r.gwIp || null
+          });
+
+        if (detailError) {
+          console.error(`Error adding rack ${rackName}:`, detailError);
+          racksFailed++;
+        } else {
+          racksAdded++;
+        }
+      }
+
       let message = `Chain "${chain}" del DC "${dc}" enviado a mantenimiento.\n\n`;
-      message += `✅ ${racksAdded} racks únicos añadidos exitosamente`;
+      message += `${racksAdded} racks unicos anadidos exitosamente`;
       if (racksFailed > 0) {
-        message += `\n⚠️ ${racksFailed} racks ya estaban en mantenimiento (omitidos)`;
+        message += `\n${racksFailed} racks ya estaban en mantenimiento u omitidos`;
       }
-      message += `\n\n📊 Total de racks únicos procesados: ${totalRacks}`;
-      if (totalPdusFiltered && totalPdusFiltered !== totalRacks) {
-        message += `\n📌 Nota: Se filtraron ${totalPdusFiltered} PDUs que pertenecen a estos ${totalRacks} racks físicos`;
-      }
+      message += `\n\nTotal de racks unicos procesados: ${uniqueRacksMap.size}`;
 
       alert(message);
       refreshData();
@@ -693,151 +736,22 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const fetchAlertSendingState = async () => {
-      try {
-        const res = await fetch('/api/alert-sending', { credentials: 'include' });
-        if (res.ok) {
-          const data = await res.json();
-          setAlertSendingEnabled(data.enabled);
-          setAlertSendingConfigured(data.configured);
-        }
-      } catch {
-      }
-    };
-    fetchAlertSendingState();
+    setAlertSendingEnabled(false);
+    setAlertSendingConfigured(false);
   }, []);
 
   const handleToggleAlertSending = async () => {
-    if (alertSendingLoading) return;
-    setAlertSendingLoading(true);
-    try {
-      const res = await fetch('/api/alert-sending', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ enabled: !alertSendingEnabled })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAlertSendingEnabled(data.enabled);
-      }
-    } catch {
-    } finally {
-      setAlertSendingLoading(false);
-    }
+    alert('La funcionalidad de envio de alertas requiere el servidor backend.');
   };
 
-  const handleSendAlertToSonar = async (rackId: string, rackName: string) => {
-    if (!confirm(`¿Deseas enviar la alerta del rack "${rackName}" a SONAR manualmente?`)) {
-      return;
-    }
-
-    try {
-      const response = await fetch('/api/sonar/send-individual', {
-        method: 'POST',
-        credentials: 'include',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ rackId, rackName })
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || `HTTP ${response.status}`);
-      }
-
-      if (data.sent > 0) {
-        alert(`${data.message}`);
-        refreshData();
-      } else {
-        alert(data.message || 'No hay alertas pendientes para enviar.');
-      }
-    } catch (error) {
-      alert(`Error al enviar alerta a SONAR: ${error instanceof Error ? error.message : 'Error desconocido'}`);
-    }
+  const handleSendAlertToSonar = async (_rackId: string, rackName: string) => {
+    alert(`La funcionalidad de envio a SONAR para "${rackName}" requiere el servidor backend.`);
   };
 
-  const handleExportAlerts = async (filterBySite: boolean = false) => {
-    setIsExporting(true);
-    setExportMessage(null);
-    setExportError(null);
+  const handleExportAlerts = async (_filterBySite: boolean = false) => {
     setShowExportMenu(false);
-
-    try {
-      const response = await fetch('/api/export/alerts', {
-        method: 'POST',
-        credentials: 'include',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({ filterBySite }),
-      });
-
-      if (!response.ok) {
-        // Try to parse JSON error message
-        const contentType = response.headers.get('content-type');
-        if (contentType && contentType.includes('application/json')) {
-          const errorData = await response.json();
-          throw new Error(errorData.message || `HTTP ${response.status}: ${response.statusText}`);
-        }
-        throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-      }
-
-      // Check if response is JSON (no alerts case) or Excel file
-      const contentType = response.headers.get('content-type');
-
-      if (contentType && contentType.includes('application/json')) {
-        // No alerts to export case
-        const result = await response.json();
-        if (result.count === 0) {
-          setExportMessage('No hay alertas para exportar en este momento.');
-        } else {
-          setExportMessage('Archivo Excel generado exitosamente.');
-        }
-      } else {
-        // Excel file received - trigger download
-        const blob = await response.blob();
-
-        // Get filename from Content-Disposition header or use default
-        const contentDisposition = response.headers.get('Content-Disposition');
-        let filename = 'alertas.xlsx';
-        if (contentDisposition) {
-          const filenameMatch = contentDisposition.match(/filename="?([^"]+)"?/);
-          if (filenameMatch) {
-            filename = filenameMatch[1];
-          }
-        }
-
-        // Create a temporary URL for the blob
-        const url = window.URL.createObjectURL(blob);
-
-        // Create a temporary anchor element and trigger download
-        const a = document.createElement('a');
-        a.style.display = 'none';
-        a.href = url;
-        a.download = filename;
-        document.body.appendChild(a);
-        a.click();
-
-        // Cleanup
-        window.URL.revokeObjectURL(url);
-        document.body.removeChild(a);
-
-        setExportMessage(`✅ Archivo descargado exitosamente: ${filename}`);
-      }
-
-      // Clear success message after 8 seconds
-      setTimeout(() => setExportMessage(null), 8000);
-
-    } catch (err) {
-      console.error('Error exporting alerts:', err);
-      setExportError(err instanceof Error ? err.message : 'Error al exportar las alertas');
-
-      // Clear error message after 8 seconds
-      setTimeout(() => setExportError(null), 8000);
-    } finally {
-      setIsExporting(false);
-    }
+    setExportError('La exportacion de alertas a Excel requiere el servidor backend. Esta funcionalidad no esta disponible en este modo.');
+    setTimeout(() => setExportError(null), 8000);
   };
 
   // Helper function to render alert summary blocks

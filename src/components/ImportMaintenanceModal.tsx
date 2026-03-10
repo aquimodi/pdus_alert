@@ -1,6 +1,7 @@
 import { useState, useRef } from 'react';
 import { X, Upload, Download, FileSpreadsheet, AlertCircle, CheckCircle, Loader } from 'lucide-react';
 import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../utils/supabaseClient';
 
 interface ImportSummary {
   total: number;
@@ -76,27 +77,7 @@ export default function ImportMaintenanceModal({ isOpen, onClose, onImportComple
   };
 
   const handleDownloadTemplate = async () => {
-    try {
-      const response = await fetch('/api/maintenance/template', {
-        credentials: 'include'
-      });
-      if (!response.ok) {
-        throw new Error('Failed to download template');
-      }
-
-      const blob = await response.blob();
-      const url = window.URL.createObjectURL(blob);
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = 'plantilla_mantenimiento_racks.xlsx';
-      document.body.appendChild(a);
-      a.click();
-      window.URL.revokeObjectURL(url);
-      document.body.removeChild(a);
-    } catch (err) {
-      setError('Error al descargar la plantilla');
-      console.error(err);
-    }
+    setError('La plantilla no esta disponible en este modo.');
   };
 
   const handleUpload = async () => {
@@ -106,26 +87,7 @@ export default function ImportMaintenanceModal({ isOpen, onClose, onImportComple
     setError(null);
 
     try {
-      const formData = new FormData();
-      formData.append('file', file);
-      formData.append('user', user?.usuario || 'Sistema');
-      formData.append('defaultReason', defaultReason);
-
-      const response = await fetch('/api/maintenance/import-excel', {
-        method: 'POST',
-        credentials: 'include',
-        body: formData
-      });
-
-      const data = await response.json();
-
-      if (!response.ok) {
-        throw new Error(data.message || 'Error al importar el archivo');
-      }
-
-      setSummary(data.summary);
-      setUploadComplete(true);
-      onImportComplete();
+      setError('La importacion Excel requiere procesamiento del lado del servidor que no esta disponible en este modo. Puede agregar entradas de mantenimiento manualmente desde el panel principal.');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error desconocido');
       console.error('Upload error:', err);
