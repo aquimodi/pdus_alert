@@ -1,4 +1,10 @@
-require('dotenv').config();
+const _path = require('path');
+const _dotenvResult = require('dotenv').config({ path: _path.resolve(__dirname, '.env') });
+if (_dotenvResult.error) {
+  console.error('[DOTENV] Failed to load .env file:', _dotenvResult.error.message);
+} else {
+  console.log('[DOTENV] Loaded .env from:', _path.resolve(__dirname, '.env'), '| Keys:', Object.keys(_dotenvResult.parsed || {}).join(', '));
+}
 const express = require('express');
 const cors = require('cors');
 const helmet = require('helmet');

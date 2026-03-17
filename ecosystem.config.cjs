@@ -1,7 +1,10 @@
+const path = require('path');
+
 module.exports = {
   apps: [{
     name: 'energy-monitoring-api',
     script: './server.cjs',
+    cwd: path.resolve(__dirname),
 
     instances: 2,
     exec_mode: 'cluster',
