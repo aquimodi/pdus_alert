@@ -25,16 +25,27 @@ param(
 $NginxPath = "D:\nginx"
 $NginxExe = "$NginxPath\nginx.exe"
 $LogFile = "$NginxPath\logs\nginx-monitor.log"
+$LifecycleLog = "$NginxPath\logs\nginx-lifecycle.log"
 $TaskName = "NginxMonitor"
 $CheckIntervalSeconds = 60
 $MaxLogSizeMB = 50
 
 function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
-    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $entry = "[$timestamp] [$Level] $Message"
+    param([string]$Message, [string]$Level = "INFO", [string]$Event = "GENERAL")
+    $timestamp = Get-Date -Format "yyyy-MM-dd HH:mm:ss.fff"
+    $entry = "[$timestamp] [$Level] [$Event] $Message"
     Add-Content -Path $LogFile -Value $entry -ErrorAction SilentlyContinue
+    Add-Content -Path $LifecycleLog -Value $entry -ErrorAction SilentlyContinue
     Write-Host $entry
+}
+
+function Write-SystemInfo {
+    $cpu = (Get-WmiObject -Class Win32_Processor -ErrorAction SilentlyContinue | Measure-Object -Property LoadPercentage -Average).Average
+    $mem = Get-WmiObject -Class Win32_OperatingSystem -ErrorAction SilentlyContinue
+    $freeMemMB = [math]::Round($mem.FreePhysicalMemory / 1024, 0)
+    $totalMemMB = [math]::Round($mem.TotalVisibleMemorySize / 1024, 0)
+    $usedMemPct = [math]::Round((($totalMemMB - $freeMemMB) / $totalMemMB) * 100, 1)
+    Write-Log "System: CPU=${cpu}% Memory=${usedMemPct}% (${freeMemMB}MB free / ${totalMemMB}MB total)" "INFO" "SYSTEM_INFO"
 }
 
 function Rotate-Log {
@@ -77,8 +88,11 @@ function Get-NginxPortListening {
 }
 
 function Start-NginxSafe {
+    Write-Log "Attempting to start Nginx..." "INFO" "NGINX_START_ATTEMPT"
+    Write-SystemInfo
+
     if (-not (Test-Path $NginxExe)) {
-        Write-Log "nginx.exe no encontrado en: $NginxExe" "CRITICAL"
+        Write-Log "nginx.exe no encontrado en: $NginxExe" "CRITICAL" "NGINX_NOT_FOUND"
         return $false
     }
 
@@ -93,44 +107,72 @@ function Start-NginxSafe {
     foreach ($dir in $tempDirs) {
         if (-not (Test-Path $dir)) {
             New-Item -ItemType Directory -Path $dir -Force | Out-Null
-            Write-Log "Directorio creado: $dir"
+            Write-Log "Directorio creado: $dir" "INFO" "DIR_CREATED"
         }
     }
 
     if (-not (Test-NginxConfig)) {
-        Write-Log "No se inicia Nginx: configuracion invalida" "ERROR"
+        Write-Log "No se inicia Nginx: configuracion invalida" "ERROR" "NGINX_CONFIG_INVALID"
         return $false
     }
 
     try {
+        $startTime = Get-Date
         Start-Process -FilePath $NginxExe -WorkingDirectory $NginxPath -WindowStyle Hidden
         Start-Sleep -Seconds 2
 
         $procs = Get-NginxProcesses
         if ($procs) {
-            Write-Log "Nginx iniciado correctamente. PIDs: $(($procs | ForEach-Object { $_.Id }) -join ', ')" "INFO"
+            $pids = ($procs | ForEach-Object { $_.Id }) -join ', '
+            $elapsed = ((Get-Date) - $startTime).TotalMilliseconds
+            Write-Log "Nginx iniciado correctamente. PIDs: $pids (startup: ${elapsed}ms)" "INFO" "NGINX_STARTED"
+
+            $portListening = Get-NginxPortListening
+            if ($portListening) {
+                Write-Log "Nginx escuchando en puerto 80 confirmado" "INFO" "NGINX_PORT_OK"
+            } else {
+                Write-Log "Nginx arrancado pero NO escucha en puerto 80 aun" "WARN" "NGINX_PORT_PENDING"
+            }
             return $true
         } else {
-            Write-Log "Nginx no se inicio correctamente (sin proceso activo tras arranque)" "ERROR"
+            Write-Log "Nginx no se inicio correctamente (sin proceso activo tras arranque)" "ERROR" "NGINX_START_FAILED"
             return $false
         }
     } catch {
-        Write-Log "Excepcion al iniciar Nginx: $_" "ERROR"
+        Write-Log "Excepcion al iniciar Nginx: $_" "ERROR" "NGINX_START_EXCEPTION"
         return $false
     }
 }
 
 function Stop-NginxSafe {
+    $preBefore = Get-NginxProcesses
+    $pidsBefore = if ($preBefore) { ($preBefore | ForEach-Object { $_.Id }) -join ', ' } else { "none" }
+    Write-Log "Sending QUIT signal to Nginx. Active PIDs before: $pidsBefore" "INFO" "NGINX_QUIT_SIGNAL"
+
     try {
-        & $NginxExe -s quit -p $NginxPath 2>&1 | Out-Null
+        $quitOutput = & $NginxExe -s quit -p $NginxPath 2>&1
+        if ($quitOutput) {
+            Write-Log "nginx -s quit output: $quitOutput" "DEBUG" "NGINX_QUIT_OUTPUT"
+        }
+        Write-Log "Waiting 3s for graceful shutdown..." "INFO" "NGINX_QUIT_WAIT"
         Start-Sleep -Seconds 3
         $remaining = Get-NginxProcesses
         if ($remaining) {
-            Write-Log "Forzando cierre de $(($remaining).Count) procesos Nginx restantes" "WARN"
+            $remainPids = ($remaining | ForEach-Object { $_.Id }) -join ', '
+            Write-Log "Forzando cierre de $(($remaining).Count) procesos Nginx restantes. PIDs: $remainPids" "WARN" "NGINX_FORCE_KILL"
             $remaining | Stop-Process -Force -ErrorAction SilentlyContinue
+            Start-Sleep -Seconds 1
+            $stillRunning = Get-NginxProcesses
+            if ($stillRunning) {
+                Write-Log "Nginx still running after force kill! PIDs: $(($stillRunning | ForEach-Object { $_.Id }) -join ', ')" "ERROR" "NGINX_KILL_FAILED"
+            } else {
+                Write-Log "Nginx processes terminated after force kill" "INFO" "NGINX_FORCE_KILLED"
+            }
+        } else {
+            Write-Log "Nginx stopped gracefully (no remaining processes)" "INFO" "NGINX_STOPPED_GRACEFUL"
         }
     } catch {
-        Write-Log "Error al detener Nginx: $_" "WARN"
+        Write-Log "Error al detener Nginx: $_" "WARN" "NGINX_STOP_ERROR"
         Get-NginxProcesses | Stop-Process -Force -ErrorAction SilentlyContinue
     }
 }
@@ -204,19 +246,25 @@ if ($Uninstall) {
 
 Rotate-Log
 
+Write-Log "Monitor check started" "INFO" "MONITOR_CHECK"
+
 $procs = Get-NginxProcesses
 
 if ($procs -and $procs.Count -gt 0) {
+    $pids = ($procs | ForEach-Object { $_.Id }) -join ', '
     $portListening = Get-NginxPortListening
     if ($portListening) {
+        Write-Log "Nginx healthy: $($procs.Count) processes (PIDs: $pids), port 80 listening" "INFO" "HEALTH_OK"
         exit 0
     }
 
-    Write-Log "Nginx tiene procesos activos (PIDs: $(($procs | ForEach-Object { $_.Id }) -join ', ')) pero NO escucha en puerto 80. Reiniciando..." "WARN"
+    Write-Log "Nginx tiene procesos activos (PIDs: $pids) pero NO escucha en puerto 80. Reiniciando..." "WARN" "NGINX_PORT_DOWN"
+    Write-SystemInfo
     Stop-NginxSafe
     Start-Sleep -Seconds 2
     Start-NginxSafe
 } else {
-    Write-Log "Nginx NO esta activo. Iniciando..." "WARN"
+    Write-Log "Nginx NO esta activo. Ningun proceso encontrado. Iniciando..." "WARN" "NGINX_DOWN"
+    Write-SystemInfo
     Start-NginxSafe
 }

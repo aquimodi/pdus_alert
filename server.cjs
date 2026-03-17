@@ -4,6 +4,7 @@ const cors = require('cors');
 const helmet = require('helmet');
 const morgan = require('morgan');
 const winston = require('winston');
+require('winston-daily-rotate-file');
 const sql = require('mssql');
 const fs = require('fs');
 const path = require('path');
@@ -11,31 +12,104 @@ const ExcelJS = require('exceljs');
 const multer = require('multer');
 const crypto = require('crypto');
 const session = require('express-session');
+const os = require('os');
 
 // Environment variables loaded from .env file
 
 const app = express();
 const port = process.env.PORT || 3001;
 
-// Winston Logger Configuration
+// Winston Logger Configuration with daily rotation
+const logFormat = winston.format.combine(
+  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+  winston.format.errors({ stack: true }),
+  winston.format.printf(({ timestamp, level, message, service, ...meta }) => {
+    const metaStr = Object.keys(meta).length ? ' ' + JSON.stringify(meta) : '';
+    return `[${timestamp}] [${level.toUpperCase()}] [${service || 'api'}] ${message}${metaStr}`;
+  })
+);
+
+const jsonFormat = winston.format.combine(
+  winston.format.timestamp({ format: 'YYYY-MM-DD HH:mm:ss.SSS' }),
+  winston.format.errors({ stack: true }),
+  winston.format.json()
+);
+
+const errorRotateTransport = new winston.transports.DailyRotateFile({
+  filename: './logs/error-%DATE%.log',
+  datePattern: 'YYYY-MM-DD',
+  level: 'error',
+  maxSize: '50m',
+  maxFiles: '30d',
+  zippedArchive: true,
+});
+
+const combinedRotateTransport = new winston.transports.DailyRotateFile({
+  filename: './logs/combined-%DATE%.log',
+  datePattern: 'YYYY-MM-DD',
+  maxSize: '100m',
+  maxFiles: '30d',
+  zippedArchive: true,
+});
+
+const requestRotateTransport = new winston.transports.DailyRotateFile({
+  filename: './logs/requests-%DATE%.log',
+  datePattern: 'YYYY-MM-DD',
+  maxSize: '100m',
+  maxFiles: '14d',
+  zippedArchive: true,
+});
+
+const lifecycleRotateTransport = new winston.transports.DailyRotateFile({
+  filename: './logs/lifecycle-%DATE%.log',
+  datePattern: 'YYYY-MM-DD',
+  maxSize: '20m',
+  maxFiles: '60d',
+  zippedArchive: true,
+});
+
 const logger = winston.createLogger({
   level: process.env.LOG_LEVEL || 'info',
-  format: winston.format.combine(
-    winston.format.timestamp(),
-    winston.format.errors({ stack: true }),
-    winston.format.json()
-  ),
-  defaultMeta: { service: 'energy-monitoring-api' },
+  format: jsonFormat,
+  defaultMeta: { service: 'energy-monitoring-api', pid: process.pid },
   transports: [
-    new winston.transports.File({ filename: './logs/error.log', level: 'error' }),
-    new winston.transports.File({ filename: './logs/combined.log' }),
+    errorRotateTransport,
+    combinedRotateTransport,
     new winston.transports.Console({
-      format: winston.format.combine(
-        winston.format.colorize(),
-        winston.format.simple()
-      )
+      format: logFormat
     })
   ],
+});
+
+const requestLogger = winston.createLogger({
+  level: 'info',
+  format: jsonFormat,
+  defaultMeta: { service: 'http-requests', pid: process.pid },
+  transports: [
+    requestRotateTransport,
+    new winston.transports.Console({
+      format: logFormat
+    })
+  ],
+});
+
+const lifecycleLogger = winston.createLogger({
+  level: 'info',
+  format: jsonFormat,
+  defaultMeta: { service: 'lifecycle', pid: process.pid },
+  transports: [
+    lifecycleRotateTransport,
+    combinedRotateTransport,
+    new winston.transports.Console({
+      format: logFormat
+    })
+  ],
+});
+
+[errorRotateTransport, combinedRotateTransport, requestRotateTransport, lifecycleRotateTransport].forEach(t => {
+  t.on('rotate', (oldFilename, newFilename) => {
+    lifecycleLogger.info('Log file rotated', { oldFilename, newFilename });
+  });
 });
 
 // Ensure logs directory exists
@@ -754,8 +828,34 @@ if (fs.existsSync(distPath)) {
   app.use(express.static(distPath));
 }
 
-// Morgan logging middleware (debug level to reduce noise)
-app.use(morgan('combined', {
+morgan.token('body-size', (req) => {
+  const len = req.headers['content-length'];
+  return len ? `${len}B` : '-';
+});
+
+app.use((req, res, next) => {
+  req._startAt = process.hrtime();
+  const originalEnd = res.end;
+  res.end = function (...args) {
+    const diff = process.hrtime(req._startAt);
+    const durationMs = (diff[0] * 1e3 + diff[1] / 1e6).toFixed(2);
+    requestLogger.info('HTTP request', {
+      method: req.method,
+      url: req.originalUrl,
+      status: res.statusCode,
+      durationMs: parseFloat(durationMs),
+      bodySize: req.headers['content-length'] || 0,
+      responseSize: res.getHeader('content-length') || 0,
+      ip: req.ip || req.connection.remoteAddress,
+      userAgent: req.headers['user-agent'] || '-',
+      referer: req.headers['referer'] || '-',
+    });
+    originalEnd.apply(this, args);
+  };
+  next();
+});
+
+app.use(morgan(':method :url :status :response-time ms - :body-size', {
   stream: {
     write: (message) => logger.debug(message.trim())
   }
@@ -5335,13 +5435,27 @@ app.get('*', (req, res) => {
 
 // Start server
 const server = app.listen(port, async () => {
-  logger.info('Server started', {
+  const startInfo = {
     port,
+    pid: process.pid,
+    ppid: process.ppid,
+    nodeVersion: process.version,
+    platform: process.platform,
+    arch: process.arch,
+    hostname: os.hostname(),
+    totalMemoryMB: Math.round(os.totalmem() / 1024 / 1024),
+    freeMemoryMB: Math.round(os.freemem() / 1024 / 1024),
+    cpus: os.cpus().length,
+    uptime: os.uptime(),
     environment: process.env.NODE_ENV || 'development',
     frontend: process.env.FRONTEND_URL || 'http://localhost:5173',
     sonar: SONAR_CONFIG.enabled ? 'enabled' : 'disabled',
-    autoAlertInterval: `${ALERT_PROCESSING_INTERVAL / 60000} minutes`
-  });
+    autoAlertInterval: `${ALERT_PROCESSING_INTERVAL / 60000} minutes`,
+    logLevel: process.env.LOG_LEVEL || 'info',
+  };
+
+  lifecycleLogger.info('SERVER_START', startInfo);
+  logger.info('Server started', { port, pid: process.pid });
 
   if (SONAR_CONFIG.enabled) {
     setTimeout(async () => {
@@ -5356,35 +5470,82 @@ const server = app.listen(port, async () => {
   startAutomaticAlertProcessing();
 });
 
-// Set server timeout to 5 minutes (for long-running operations like chain maintenance)
 server.timeout = 300000;
 server.keepAliveTimeout = 65000;
 server.headersTimeout = 66000;
 
-// Graceful shutdown
-async function gracefulShutdown(signal) {
-  logger.info('Shutdown initiated', { signal });
+server.on('connection', (socket) => {
+  const addr = socket.remoteAddress;
+  socket.on('close', () => {
+    lifecycleLogger.debug('TCP_CONNECTION_CLOSED', { remoteAddress: addr });
+  });
+});
 
+server.on('close', () => {
+  lifecycleLogger.info('HTTP_SERVER_CLOSE', { pid: process.pid });
+});
+
+// Memory and health heartbeat every 5 minutes
+const HEARTBEAT_INTERVAL = 5 * 60 * 1000;
+const heartbeatTimer = setInterval(() => {
+  const mem = process.memoryUsage();
+  lifecycleLogger.info('HEARTBEAT', {
+    pid: process.pid,
+    uptimeSeconds: Math.round(process.uptime()),
+    rssKB: Math.round(mem.rss / 1024),
+    heapUsedKB: Math.round(mem.heapUsed / 1024),
+    heapTotalKB: Math.round(mem.heapTotal / 1024),
+    externalKB: Math.round(mem.external / 1024),
+    freeMemoryMB: Math.round(os.freemem() / 1024 / 1024),
+    loadAvg: os.loadavg(),
+    activeConnections: server.connections || 'N/A',
+    dbPoolConnected: globalPool ? globalPool.connected : false,
+  });
+}, HEARTBEAT_INTERVAL);
+heartbeatTimer.unref();
+
+async function gracefulShutdown(signal) {
+  const shutdownStart = Date.now();
+  const mem = process.memoryUsage();
+  lifecycleLogger.info('SHUTDOWN_INITIATED', {
+    signal,
+    pid: process.pid,
+    uptimeSeconds: Math.round(process.uptime()),
+    rssKB: Math.round(mem.rss / 1024),
+    heapUsedKB: Math.round(mem.heapUsed / 1024),
+  });
+
+  clearInterval(heartbeatTimer);
   stopAutomaticAlertProcessing();
 
   server.close(async () => {
-    logger.info('HTTP server closed');
+    lifecycleLogger.info('HTTP_SERVER_CLOSED', { pid: process.pid, signal });
 
     if (globalPool && globalPool.connected) {
       try {
         await globalPool.close();
-        logger.info('Database connection pool closed');
+        lifecycleLogger.info('DB_POOL_CLOSED', { pid: process.pid });
       } catch (error) {
-        logger.error('Error closing database pool', { error: error.message });
+        lifecycleLogger.error('DB_POOL_CLOSE_ERROR', { error: error.message });
       }
     }
 
-    logger.info('Process terminated');
+    const shutdownDuration = Date.now() - shutdownStart;
+    lifecycleLogger.info('PROCESS_EXIT', {
+      pid: process.pid,
+      signal,
+      shutdownDurationMs: shutdownDuration,
+      exitCode: 0,
+    });
     process.exit(0);
   });
 
   setTimeout(() => {
-    logger.error('Forced shutdown after timeout');
+    lifecycleLogger.error('FORCED_SHUTDOWN', {
+      pid: process.pid,
+      signal,
+      reason: 'Graceful shutdown timeout exceeded (10s)',
+    });
     process.exit(1);
   }, 10000);
 }
@@ -5393,11 +5554,39 @@ process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
 
 process.on('uncaughtException', (error) => {
+  lifecycleLogger.error('UNCAUGHT_EXCEPTION', {
+    pid: process.pid,
+    error: error.message,
+    stack: error.stack,
+    uptimeSeconds: Math.round(process.uptime()),
+  });
   logger.error('Uncaught Exception', { error: error.message, stack: error.stack });
   process.exit(1);
 });
 
 process.on('unhandledRejection', (reason, promise) => {
+  lifecycleLogger.error('UNHANDLED_REJECTION', {
+    pid: process.pid,
+    reason: String(reason),
+    uptimeSeconds: Math.round(process.uptime()),
+  });
   logger.error('Unhandled Rejection', { reason: String(reason) });
   process.exit(1);
+});
+
+process.on('warning', (warning) => {
+  lifecycleLogger.warn('PROCESS_WARNING', {
+    pid: process.pid,
+    name: warning.name,
+    message: warning.message,
+    stack: warning.stack,
+  });
+});
+
+process.on('exit', (code) => {
+  lifecycleLogger.info('PROCESS_EXIT_EVENT', {
+    pid: process.pid,
+    exitCode: code,
+    uptimeSeconds: Math.round(process.uptime()),
+  });
 });
